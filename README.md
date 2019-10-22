@@ -1,2 +1,0 @@
-# GoPushServer
-pushServer in Golang
