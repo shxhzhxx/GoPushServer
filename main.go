@@ -7,6 +7,8 @@ import (
 	"net"
 )
 
+const BUFF_SIZE = 512
+
 var clients = make(map[int]*net.TCPConn)
 
 func main() {
@@ -24,55 +26,80 @@ func main() {
 	}
 }
 
+func min(x, y int) int {
+	if x < y {
+		return x
+	}
+	return y
+}
+
 func handleConnection(conn *net.TCPConn) {
-	defer conn.Close()
 	conn.SetKeepAlive(true)
 	conn.SetKeepAlivePeriod(60 * 1000000000)
-	buffer := make([]byte, 1024)
-	channel := make(chan byte, 128)
+	defer conn.Close()
+
+	// var id uint
+	buffer := make([]byte, BUFF_SIZE)
 	for {
-		pos := 0
-		for pos < 4 {
-			n, err := conn.Read(buffer[pos:4])
-			if err != nil {
-				log.Println("broken link")
-				return
-			}
-			pos += n
-		}
-		len := int(binary.BigEndian.Uint32(buffer[0:4]))
-		if len < 5 || len > 1024 {
-			conn.Write([]byte(fmt.Sprintf("invalid len %v", len)))
-			log.Println("invalid len:", len)
+		n, err := conn.Read(buffer[0:1])
+		if err != nil || n != 1 {
+			log.Println("broken link")
 			return
 		}
-		log.Println("len:", len, buffer)
-		for pos < len {
-			n, err := conn.Read(buffer[pos:len])
-			if err != nil {
-				log.Println("broken link")
-				return
+		switch cmd := buffer[0]; cmd {
+		case 0: //echo
+			for pos := 0; pos < 4; {
+				n, err := conn.Read(buffer[pos:4])
+				if err != nil {
+					log.Println("broken link")
+					return
+				}
+				pos += n
 			}
-			pos += n
+			len := int(binary.BigEndian.Uint32(buffer[0:4]))
+			conn.Write(buffer[0:4])
+			for len > 0 {
+				n, err := conn.Read(buffer[0:min(BUFF_SIZE, len)])
+				if err != nil {
+					log.Println("broken link")
+					return
+				}
+				conn.Write(buffer[0:n])
+				len -= n
+			}
+		case 1: //bind
+			conn.Write([]byte("bind"))
+		default:
+			conn.Write([]byte(fmt.Sprintf("\nunknow cmd: %v\n", cmd)))
+			log.Println("unknow cmd: ", cmd)
+			return
 		}
-		log.Println("len:", len, buffer)
+
+		// pos := 0
+		// for pos < 4 {
+		// 	n, err := conn.Read(buffer[pos:4])
+		// 	if err != nil {
+		// 		log.Println("broken link")
+		// 		return
+		// 	}
+		// 	pos += n
+		// }
+		// len := int(binary.BigEndian.Uint32(buffer[0:4]))
+		// if len < 5 {
+		// 	conn.Write([]byte(fmt.Sprintf("invalid len %v", len)))
+		// 	log.Println("invalid len:", len)
+		// 	return
+		// }
+
+		// log.Println("len:", len, buffer)
+		// for pos < len {
+		// 	n, err := conn.Read(buffer[pos:len])
+		// 	if err != nil {
+		// 		log.Println("broken link")
+		// 		return
+		// 	}
+		// 	pos += n
+		// }
+		// log.Println("len:", len, buffer)
 	}
-	// bufferBytes, err := bufio.NewReader(conn).ReadBytes('\n')
-
-	// if err != nil {
-	// 	log.Println("client left..")
-
-	// 	conn.Close()
-	// 	return
-	// }
-
-	// message := string(bufferBytes)
-	// clientAddr := conn.RemoteAddr().String()
-	// response := fmt.Sprintf(message + " from " + clientAddr + "\n")
-
-	// log.Println(response)
-
-	// conn.Write([]byte("you sent: " + response))
-
-	// handleConnection(conn)
 }
