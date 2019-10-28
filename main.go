@@ -74,32 +74,5 @@ func handleConnection(conn *net.TCPConn) {
 			log.Println("unknow cmd: ", cmd)
 			return
 		}
-
-		// pos := 0
-		// for pos < 4 {
-		// 	n, err := conn.Read(buffer[pos:4])
-		// 	if err != nil {
-		// 		log.Println("broken link")
-		// 		return
-		// 	}
-		// 	pos += n
-		// }
-		// len := int(binary.BigEndian.Uint32(buffer[0:4]))
-		// if len < 5 {
-		// 	conn.Write([]byte(fmt.Sprintf("invalid len %v", len)))
-		// 	log.Println("invalid len:", len)
-		// 	return
-		// }
-
-		// log.Println("len:", len, buffer)
-		// for pos < len {
-		// 	n, err := conn.Read(buffer[pos:len])
-		// 	if err != nil {
-		// 		log.Println("broken link")
-		// 		return
-		// 	}
-		// 	pos += n
-		// }
-		// log.Println("len:", len, buffer)
 	}
 }
