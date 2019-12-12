@@ -7,7 +7,7 @@ import (
 	"sync"
 )
 
-const BUFF_SIZE = 16
+const BUFF_SIZE = 32 * 1024
 
 const CMD_ERR = 0
 const ERR_UNKNOWN_CMD = 0
@@ -40,6 +40,7 @@ func main() {
 	if err != nil {
 		log.Fatal("tcp server listener error:", err)
 	}
+	go test()
 
 	for {
 		conn, err := listener.AcceptTCP()
@@ -50,85 +51,116 @@ func main() {
 	}
 }
 
-func min(x, y uint32) uint32 {
+func min(x, y int) int {
 	if x < y {
 		return x
 	}
 	return y
 }
 
+func stuffFull(conn *net.TCPConn, buffer []byte) {
+	end := len(buffer)
+	for pos := 0; pos < end; {
+		n, err := conn.Read(buffer[pos:end])
+		if err != nil {
+			panic(err)
+		}
+		pos += n
+	}
+}
+
+func consume(conn *net.TCPConn, buffer []byte, size int, consumer func([]byte)) {
+	len := len(buffer)
+	for size > 0 {
+		n, err := conn.Read(buffer[0:min(len, size)])
+		if err != nil {
+			panic(err)
+		}
+		consumer(buffer[0:n])
+		size -= n
+	}
+}
+
+/**
+用channel构建buffer池，不需要每个client一个buffer，节省内存。
+增加超时机制，开始执行一个命令后，x秒内没有收到更多数据则断开链接，防止客户端错误引起的内存泄漏。（要考虑大文件传输的情况，不能给整个命令一个执行超时）
+*/
 func handleConnection(conn *net.TCPConn) {
 	conn.SetKeepAlive(true)
 	conn.SetKeepAlivePeriod(10 * 1000000000)
 
 	conns[conn] = true
-	addr := []byte(conn.RemoteAddr().String())
 	var id uint32 = 0
 	closeClient := func() {
 		log.Println("close client:", id)
-		if id != 0 {
-			delete(clients, id)
-		}
 		delete(conns, conn)
 		conn.Close()
+		if id != 0 {
+			mux.Lock()
+			defer mux.Unlock()
+			delete(clients, id)
+		}
 	}
 	defer closeClient()
 
-	buffer := make([]byte, BUFF_SIZE)
+	errBuffer := []byte{CMD_ERR, 0, 0}
 	sendErr := func(err uint16) {
-		buffer[0] = CMD_ERR
-		binary.BigEndian.PutUint16(buffer[1:3], err)
-		conn.Write(buffer[0:3])
+		binary.BigEndian.PutUint16(errBuffer[1:3], err)
+		conn.Write(errBuffer)
 	}
-	writeToBuffer := func(start, offset int) bool {
-		end := start + offset
-		for pos := start; pos < end; {
-			n, err := conn.Read(buffer[pos:end])
-			if err != nil {
-				log.Println("broken link")
-				return false
-			}
-			pos += n
-		}
-		return true
+
+	intBuffer := make([]byte, 4)
+	readInt := func() uint32 {
+		stuffFull(conn, intBuffer)
+		return binary.BigEndian.Uint32(intBuffer)
 	}
-	read := func(len uint32, consumer func([]byte)) bool {
-		for len > 0 {
-			n, err := conn.Read(buffer[0:min(BUFF_SIZE, len)])
-			if err != nil {
-				log.Println("broken link")
-				return false
-			}
-			consumer(buffer[0:n])
-			len -= uint32(n)
+	writeIntTo := func(c *net.TCPConn, value uint32) {
+		binary.BigEndian.PutUint32(intBuffer, value)
+		_, err := c.Write(intBuffer)
+		if err != nil {
+			panic(err)
 		}
-		return true
+	}
+	writeInt := func(value uint32) {
+		writeIntTo(conn, value)
+	}
+	readCmd := func() byte {
+		_, err := conn.Read(intBuffer[0:1])
+		if err != nil {
+			panic(err)
+		}
+		return intBuffer[0]
+	}
+	writeCmdTo := func(c *net.TCPConn, cmd byte) {
+		intBuffer[0] = cmd
+		_, err := c.Write(intBuffer[0:1])
+		if err != nil {
+			panic(err)
+		}
+	}
+	writeCmd := func(cmd byte) {
+		writeCmdTo(conn, cmd)
+	}
+
+	buffer := make([]byte, BUFF_SIZE)
+	read := func(size uint32, consumer func([]byte)) {
+		consume(conn, buffer, int(size), consumer)
 	}
 	for {
-		if !writeToBuffer(0, 1) {
-			return
-		}
-		switch cmd := buffer[0]; cmd {
+		switch cmd := readCmd(); cmd {
 		case CMD_ECHO:
-			if !writeToBuffer(1, 4) {
-				return
-			}
-			len := binary.BigEndian.Uint32(buffer[1:5])
-			conn.Write(buffer[0:5])
-			if !read(len, func(data []byte) {
+			len := readInt()
+			writeCmd(cmd)
+			writeInt(len)
+			read(len, func(data []byte) {
 				conn.Write(data)
-			}) {
-				return
-			}
+			})
 		case CMD_BIND:
 			if id != 0 {
 				sendErr(ERR_REPEAT_BINDING)
 				return
 			}
-			if !writeToBuffer(0, 4) {
-				return
-			}
-			id = binary.BigEndian.Uint32(buffer[0:4])
+			id = readInt()
 			if id == 0 {
 				sendErr(ERR_BIND_ID_INVALID)
 				return
@@ -139,52 +171,53 @@ func handleConnection(conn *net.TCPConn) {
 				return
 			}
 		case CMD_PUSH:
-			if !writeToBuffer(0, 4) {
-				return
-			}
-			ids := make([]uint32, binary.BigEndian.Uint32(buffer[0:4]))
+			ids := make([]uint32, readInt())
 			for i := range ids {
-				if !writeToBuffer(0, 4) {
-					return
+				ids[i] = readInt()
+			}
+			len := readInt()
+			for _, id := range ids {
+				c, ok := clients[id]
+				if ok {
+					writeCmdTo(c, CMD_PUSH)
+					writeIntTo(c, len)
 				}
-				ids[i] = binary.BigEndian.Uint32(buffer[0:4])
 			}
-			if !writeToBuffer(0, 4) {
-				return
-			}
-			len := binary.BigEndian.Uint32(buffer[0:4])
-			if !read(len, func(data []byte) {
+			read(len, func(data []byte) {
 				for _, id := range ids {
 					c, ok := clients[id]
 					if ok {
 						c.Write(data)
 					}
 				}
-			}) {
-				return
-			}
+			})
 		case CMD_BROADCAST:
-			if !writeToBuffer(0, 4) {
-				return
+			len := readInt()
+			for c := range conns {
+				if c != conn {
+					writeCmdTo(c, CMD_BROADCAST)
+					writeIntTo(c, len)
+				}
 			}
-			len := binary.BigEndian.Uint32(buffer[0:4])
-			if !read(len, func(data []byte) {
+			read(len, func(data []byte) {
 				for c := range conns {
 					if c != conn {
 						c.Write(data)
 					}
 				}
-			}) {
-				return
-			}
+			})
 		case CMD_IP:
+			addr := []byte(conn.RemoteAddr().String())
 			binary.BigEndian.PutUint32(buffer[1:5], uint32(len(addr)))
 			conn.Write(buffer[0:5])
 			conn.Write(addr)
 		default:
 			sendErr(ERR_UNKNOWN_CMD)
-			log.Println("unknown cmd:", cmd)
 			return
 		}
 	}
+}
+
+func test() {
+
 }
